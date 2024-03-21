@@ -151,41 +151,35 @@ def clean_schema(schema: Dict[str, Any]) -> None:
         del schema["description"]
 
 
+def update_additional_properties_entry(defs: Dict[str, Any]) -> None:
+    """
+    Update additionalProperties entry.
+
+    Either use the existing value or add an entry with value 'False'.
+    This prevents '[k: string]: any' from being added to interfaces
+    where it is not explicitly configured with 'extra' = 'allow'.
+    """
+    props = defs.get("additionalProperties", False)
+    defs["additionalProperties"] = props
+
+
 def generate_json_schema_v1(models: List[Type[BaseModel]]) -> str:
     """
     Create a top-level '_Master_' model with references to each of the actual models.
     Generate the schema for this model, which will include the schemas for all the
     nested models. Then clean up the schema.
-
-    One weird thing we do is we temporarily override the 'extra' setting in models,
-    changing it to 'forbid' UNLESS it was explicitly set to 'allow'. This prevents
-    '[k: string]: any' from being added to every interface. This change is reverted
-    once the schema has been generated.
     """
-    model_extras = [getattr(m.Config, "extra", None) for m in models]
+    master_model = create_model("_Master_", **{m.__name__: (m, ...) for m in models})
+    master_model.Config.extra = Extra.forbid
+    master_model.Config.schema_extra = staticmethod(clean_schema)
 
-    try:
-        for m in models:
-            if getattr(m.Config, "extra", None) != Extra.allow:
-                m.Config.extra = Extra.forbid
+    schema = json.loads(master_model.schema_json())
 
-        master_model = create_model(
-            "_Master_", **{m.__name__: (m, ...) for m in models}
-        )
-        master_model.Config.extra = Extra.forbid
-        master_model.Config.schema_extra = staticmethod(clean_schema)
+    for d in schema.get("definitions", {}).values():
+        clean_schema(d)
+        update_additional_properties_entry(d)
 
-        schema = json.loads(master_model.schema_json())
-
-        for d in schema.get("definitions", {}).values():
-            clean_schema(d)
-
-        return json.dumps(schema, indent=2)
-
-    finally:
-        for m, x in zip(models, model_extras):
-            if x is not None:
-                m.Config.extra = x
+    return json.dumps(schema, indent=2)
 
 
 def generate_json_schema_v2(models: List[Type[BaseModel]]) -> str:
@@ -193,36 +187,20 @@ def generate_json_schema_v2(models: List[Type[BaseModel]]) -> str:
     Create a top-level '_Master_' model with references to each of the actual models.
     Generate the schema for this model, which will include the schemas for all the
     nested models. Then clean up the schema.
-
-    One weird thing we do is we temporarily override the 'extra' setting in models,
-    changing it to 'forbid' UNLESS it was explicitly set to 'allow'. This prevents
-    '[k: string]: any' from being added to every interface. This change is reverted
-    once the schema has been generated.
     """
-    model_extras = [m.model_config.get("extra") for m in models]
+    master_model: BaseModel = create_model(
+        "_Master_", **{m.__name__: (m, ...) for m in models}
+    )
+    master_model.model_config["extra"] = "forbid"
+    master_model.model_config["json_schema_extra"] = staticmethod(clean_schema)
 
-    try:
-        for m in models:
-            if m.model_config.get("extra") != "allow":
-                m.model_config["extra"] = "forbid"
+    schema: dict = master_model.model_json_schema(mode="serialization")
 
-        master_model: BaseModel = create_model(
-            "_Master_", **{m.__name__: (m, ...) for m in models}
-        )
-        master_model.model_config["extra"] = "forbid"
-        master_model.model_config["json_schema_extra"] = staticmethod(clean_schema)
+    for d in schema.get("$defs", {}).values():
+        clean_schema(d)
+        update_additional_properties_entry(d)
 
-        schema: dict = master_model.model_json_schema(mode="serialization")
-
-        for d in schema.get("$defs", {}).values():
-            clean_schema(d)
-
-        return json.dumps(schema, indent=2)
-
-    finally:
-        for m, x in zip(models, model_extras):
-            if x is not None:
-                m.model_config["extra"] = x
+    return json.dumps(schema, indent=2)
 
 
 def generate_typescript_defs(
